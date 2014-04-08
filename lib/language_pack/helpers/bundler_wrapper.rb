@@ -1,9 +1,10 @@
 class LanguagePack::Helpers::BundlerWrapper
+  include LanguagePack::ShellHelpers
+
   class GemfileParseError < StandardError
     def initialize(error)
       msg = "There was an error parsing your Gemfile, we cannot continue\n"
-      msg << error.message
-      self.set_backtrace(error.backtrace)
+      msg << error
       super msg
     end
   end
@@ -18,36 +19,26 @@ class LanguagePack::Helpers::BundlerWrapper
 
   def initialize(options = {})
     @fetcher              = options[:fetcher]      || DEFAULT_FETCHER
-    @bundler_path         = options[:bundler_path] || File.join(Dir.mktmpdir, BUNDLER_DIR_NAME)
+    @bundler_path         = options[:bundler_path] || File.join(Dir.mktmpdir, "#{BUNDLER_DIR_NAME}-debug")
     @gemfile_path         = options[:gemfile_path] || GEMFILE_PATH
-    @bundler_tar          = options[:bundler_tar]  || "#{BUNDLER_DIR_NAME}.tgz"
+    @bundler_tar          = options[:bundler_tar]  || "#{BUNDLER_DIR_NAME}-debug.tgz"
     @gemfile_lock_path    = "#{@gemfile_path}.lock"
     @orig_bundle_gemfile  = ENV['BUNDLE_GEMFILE']
     ENV['BUNDLE_GEMFILE'] = @gemfile_path.to_s
-    @unlock               = false
     @path                 = Pathname.new "#{@bundler_path}/gems/#{BUNDLER_DIR_NAME}/lib"
   end
 
   def install
     fetch_bundler
+    ENV["GEM_PATH"] = "#{File.join(bundler_path, "gems", BUNDLER_DIR_NAME)}-debug:$GEM_PATH"
     $LOAD_PATH << @path
-    without_warnings do
-      load @path.join("bundler.rb")
-    end
+    require "bundler"
     self
   end
 
   def clean
     ENV['BUNDLE_GEMFILE'] = @orig_bundle_gemfile
     FileUtils.remove_entry_secure(bundler_path) if Dir.exist?(bundler_path)
-  end
-
-  def without_warnings(&block)
-    orig_verb  = $VERBOSE
-    $VERBOSE   = nil
-    yield
-  ensure
-    $VERBOSE = orig_verb
   end
 
   def has_gem?(name)
@@ -86,26 +77,31 @@ class LanguagePack::Helpers::BundlerWrapper
     LanguagePack::Instrument.instrument(*args, &block)
   end
 
-  def ui
-    Bundler.ui = Bundler::UI::Shell.new({})
-  end
-
-  def definition
-    Bundler.definition(@unlock)
-  rescue => e
-    raise GemfileParseError.new(e)
-  end
-
-  def unlock
-    @unlock = true
-    yield
-  ensure
-    @unlock = false
-  end
-
   def ruby_version
-    unlock do
-      definition.ruby_version
+    instrument 'detec_ruby_version' do
+      puts "=============================================="
+      old_system_path = "/usr/local/bin:/usr/local/sbin:/usr/bin:/bin:/usr/sbin:/sbin"
+      env = { "PATH"     => "#{bundler_path}/bin:#{old_system_path}",
+              "RUBYLIB"  => File.join(bundler_path, "gems", BUNDLER_DIR_NAME, "lib")
+            }
+      command = "bundle platform --ruby"
+
+      puts run_stdout("which bundle", user_env: true, env: env)
+
+      puts run("cat /usr/bin/gem", env: env)
+      puts run(%Q{ruby -e "require 'rubygems'; puts Gem.object_id"}, env: env)
+      puts run("which gem", env: env)
+      puts run("gem env", env: env)
+      puts run("gem list", env: env)
+      puts run("bundle -v", user_env: true, env: env)
+
+      output  = run_stdout(command, user_env: true, env: env)
+      raise GemfileParseError.new(run(command, user_env: true, env: env)) unless $?.success?
+      if output.match(/No ruby version specified/)
+        ""
+      else
+        output.chomp.sub('(', '').sub(')', '').split.join('-')
+      end
     end
   end
 
